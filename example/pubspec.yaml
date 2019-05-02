@@ -25,7 +25,6 @@ dev_dependencies:
     sdk: flutter
 
   image_picker: ^0.4.10
-  
   image: ^2.0.5
 
   tflite:
@@ -52,6 +51,8 @@ flutter:
    - assets/ssd_mobilenet.txt
    - assets/deeplabv3_257_mv_gpu.tflite
    - assets/deeplabv3_257_mv_gpu.txt
+   - assets/yolov3-custom.tflite
+   - assets/yolov3-custom.txt
 
 
   # An image asset can refer to one or more resolution-specific "variants", see

@@ -13,6 +13,7 @@ void main() => runApp(new App());
 const String mobile = "MobileNet";
 const String ssd = "SSD MobileNet";
 const String yolo = "Tiny YOLOv2";
+const String custom = "Custom";
 const String deeplab = "DeepLab";
 
 class App extends StatelessWidget {
@@ -31,8 +32,9 @@ class MyApp extends StatefulWidget {
 
 class _MyAppState extends State<MyApp> {
   File _image;
+  Image _resizedImage;
   List _recognitions;
-  String _model = mobile;
+  String _model = custom;
   double _imageHeight;
   double _imageWidth;
   bool _busy = false;
@@ -50,6 +52,9 @@ class _MyAppState extends State<MyApp> {
     if (image == null) return;
 
     switch (_model) {
+      case custom:
+        await yolov3Tiny(image);
+        break;
       case yolo:
         await yolov2Tiny(image);
         break;
@@ -104,6 +109,11 @@ class _MyAppState extends State<MyApp> {
           res = await Tflite.loadModel(
               model: "assets/deeplabv3_257_mv_gpu.tflite",
               labels: "assets/deeplabv3_257_mv_gpu.txt");
+          break;
+        case custom:
+          res = await Tflite.loadModel(
+              model: "assets/yolov3-custom.tflite",
+              labels: "assets/yolov3-custom.txt");
           break;
         default:
           res = await Tflite.loadModel(
@@ -198,6 +208,39 @@ class _MyAppState extends State<MyApp> {
     });
   }
 
+  Future yolov3Tiny(File image) async {
+    print('yolov3Tiny detection...');
+    var recognitions = await Tflite.detectObjectOnImage(
+      path: image.path,
+      model: "YOLOv3",
+      threshold: 0.25,
+      imageMean: 0.0,
+      imageStd: 255.0,
+      numBoxesPerBlock: 3,
+      anchors: [ 
+        [203,124, 123,278, 285,331],
+        [12,25, 35,67, 63,160]
+      ],
+      numResultsPerClass: 1,
+    );
+    // var imageBytes = (await rootBundle.load(image.path)).buffer;
+    // img.Image oriImage = img.decodeJpg(imageBytes.asUint8List());
+    // img.Image resizedImage = img.copyResize(oriImage, 416, 416);
+    // var recognitions = await Tflite.detectObjectOnBinary(
+    //   binary: imageToByteListFloat32(resizedImage, 416, 0.0, 255.0),
+    //   model: "YOLOv3",
+    //   threshold: 0.25,
+    //   numResultsPerClass: 1,
+    // );
+
+    // 8, 7, 1
+    
+    setState(() {
+      // _resizedImage = Image.memory(resizedImage.getBytes());
+      _recognitions = recognitions;
+    });
+  }
+
   Future ssdMobileNet(File image) async {
     var recognitions = await Tflite.detectObjectOnImage(
       path: image.path,
@@ -250,7 +293,7 @@ class _MyAppState extends State<MyApp> {
     double factorX = screen.width;
     double factorY = _imageHeight / _imageWidth * screen.width;
     Color blue = Color.fromRGBO(37, 213, 253, 1.0);
-    return _recognitions.map((re) {
+    return _recognitions.map((re) { 
       return Positioned(
         left: re["rect"]["x"] * factorX,
         top: re["rect"]["y"] * factorY,
@@ -304,6 +347,14 @@ class _MyAppState extends State<MyApp> {
         width: size.width,
         child: _image == null ? Text('No image selected.') : Image.file(_image),
       ));
+      if (_resizedImage != null && _imageHeight != null && _imageWidth != null) {
+        stackChildren.add(Positioned(
+          top: _imageHeight * size.width / _imageHeight,
+          left: 0.0,
+          width: size.width,
+          child: _resizedImage,
+        ));
+      }
     }
 
     if (_model == mobile) {
@@ -323,7 +374,19 @@ class _MyAppState extends State<MyApp> {
               : [],
         ),
       ));
-    } else if (_model == ssd || _model == yolo) {
+    } else if (_model == ssd || _model == yolo || _model == custom) {
+
+      // if (_recognitions != null && _model == custom) {
+      //   double zoomRatioWidth = size.width / 416;
+      //   double zoomRatioHeight = size.height / 416;
+      //   for (int i = 0; i < _recognitions.length; i++) {
+      //     _recognitions[i]["rect"]["x"] *= zoomRatioWidth;
+      //     _recognitions[i]["rect"]["w"] *= zoomRatioWidth;
+      //     _recognitions[i]["rect"]["y"] *= zoomRatioHeight;
+      //     _recognitions[i]["rect"]["h"] *= zoomRatioHeight;
+      //   }
+      // }
+
       stackChildren.addAll(renderBoxes(size));
     }
 
@@ -358,6 +421,10 @@ class _MyAppState extends State<MyApp> {
                 const PopupMenuItem<String>(
                   child: Text(deeplab),
                   value: deeplab,
+                ),
+                const PopupMenuItem<String>(
+                  child: Text(custom),
+                  value: custom,
                 )
               ];
               return menuEntries;

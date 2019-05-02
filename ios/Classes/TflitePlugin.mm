@@ -1,4 +1,5 @@
-// #define CONTRIB_PATH
+//#define CONTRIB_PATH
+#define TFLITE_USE_GPU_DELEGATE 1
 
 #import "TflitePlugin.h"
 
@@ -22,7 +23,13 @@
 #include "tensorflow/lite/op_resolver.h"
 #endif
 
+//#if TFLITE_USE_GPU_DELEGATE
+//#include "tensorflow/lite/delegates/gpu/metal_delegate.h"
+//#endif
+
+//TensorFlowLiteGpuExperimental/tensorflow_lite_gpu
 #include "ios_image_load.h"
+#include "box.h"
 
 #define LOG(x) std::cerr
 
@@ -104,6 +111,20 @@ std::vector<std::string> labels;
 std::unique_ptr<tflite::FlatBufferModel> model;
 std::unique_ptr<tflite::Interpreter> interpreter;
 bool interpreter_busy = false;
+
+void YOLOv3Head(
+                int block_size,
+                float* output,
+                int input_size,
+                int num_classes,
+                float threshold,
+                int num_boxes_per_bolock,
+                const NSArray* anchors,
+                std::priority_queue<std::pair<float, Box*>, std::vector<std::pair<float, Box*>>,
+                std::less<std::pair<float, Box*>>> *top_result_pq);
+float calculateIOU(Box* boxA, Box* boxB);
+NSMutableArray* performNMS(std::priority_queue<std::pair<float, Box*>, std::vector<std::pair<float, Box*>>,
+             std::less<std::pair<float, Box*>>> top_result_pq, float confidenceThreshold, float iouThreshold);
 
 static void LoadLabels(NSString* labels_path,
                        std::vector<std::string>* label_strings) {
@@ -285,13 +306,17 @@ void feedInputTensor(uint8_t* in, int* input_size, int image_height, int image_w
   }
 }
 
-void feedInputTensorImage(const NSString* image_path, float input_mean, float input_std, int* input_size) {
+void feedInputTensorImageResize(const NSString* image_path, float input_mean, float input_std, int* input_size, int new_width, int new_height) {
   int image_channels;
   int image_height;
   int image_width;
-  std::vector<uint8_t> image_data = LoadImageFromFile([image_path UTF8String], &image_width, &image_height, &image_channels);
+  std::vector<uint8_t> image_data = LoadImageFromFileResize([image_path UTF8String], &image_width, &image_height, &image_channels, new_width, new_height);
   uint8_t* in = image_data.data();
   feedInputTensor(in, input_size, image_height, image_width, image_channels, input_mean, input_std);
+}
+
+void feedInputTensorImage(const NSString* image_path, float input_mean, float input_std, int* input_size) {
+    return feedInputTensorImageResize(image_path, input_mean, input_std, input_size, 0, 0);
 }
 
 void feedInputTensorFrame(const FlutterStandardTypedData* typedData, int* input_size,
@@ -596,6 +621,186 @@ NSMutableArray* parseYOLO(int num_classes, const NSArray* anchors, int block_siz
   return results;
 }
 
+float calculateIOU(Box* boxA, Box* boxB) {
+    //  determine the (x, y)-coordinates of the intersection rectangle
+    float boxAx2 = boxA.x + boxA.width;
+    float boxAy2 = boxA.y + boxA.height;
+    
+    float boxBx2 = boxB.x + boxB.width;
+    float boxBy2 = boxB.y + boxB.height;
+    
+    float xA = fmax(boxA.x, boxB.x);
+    float yA = fmax(boxA.y, boxB.y);
+    float xB = fmin(boxAx2, boxBx2);
+    float yB = fmin(boxAy2, boxBy2);
+    
+    // compute the area of intersection rectangle
+    float interArea = fmax(0, xB - xA) * fmax(0, yB - yA);
+    
+    // compute the area of both the prediction and ground-truth rectangles
+    float boxAArea = boxA.width * boxA.height;
+    float boxBArea = boxB.width * boxB.height;
+    
+    // compute the intersection over union by taking the intersection
+    // area and dividing it by the sum of prediction + ground-truth
+    // areas - the interesection area
+    float iou = interArea / (boxAArea + boxBArea - interArea);
+    
+    //    if (iou > 0) {
+    //        LOGGER.i("Box A: %.2f, %.2f   %.2f x %.2f", boxA[0], boxA[1], boxA[2], boxA[3]);
+    //        LOGGER.i("Box B: %.2f, %.2f   %.2f x %.2f", boxB[0], boxB[1], boxB[2], boxB[3]);
+    //        LOGGER.i("Intersection: %.2f, %.2f   %.2f x %.2f", xA, yA, (xB - xA), (yB - yA));
+    //        LOGGER.i("IOU: %.2f", iou);
+    //    }
+    // return the intersection over union value
+    return iou;
+}
+
+NSMutableArray* performNMS(std::priority_queue<std::pair<float, Box*>, std::vector<std::pair<float, Box*>>,
+             std::less<std::pair<float, Box*>>> top_result_pq, float iouThreshold) {
+    NSMutableArray *sortedBoxes = [NSMutableArray array];
+    while (!top_result_pq.empty()) {
+        Box* box = top_result_pq.top().second;
+        top_result_pq.pop();
+        [sortedBoxes addObject:box];
+    }
+    
+    NSMutableArray *outBoxes = [NSMutableArray array];
+    while ([sortedBoxes count] > 0) {
+        Box *topBox = [sortedBoxes objectAtIndex:0];
+        [sortedBoxes removeObject:topBox];
+        
+        NSMutableDictionary* rect = [NSMutableDictionary dictionary];
+        NSMutableDictionary* res = [NSMutableDictionary dictionary];
+        
+        [rect setObject:@(topBox.x) forKey:@"x"];
+        [rect setObject:@(topBox.y) forKey:@"y"];
+        [rect setObject:@(topBox.width) forKey:@"w"];
+        [rect setObject:@(topBox.height) forKey:@"h"];
+        
+        [res setObject:rect forKey:@"rect"];
+        [res setObject:@(topBox.confidence) forKey:@"confidenceInClass"];
+        [res setObject:topBox.className forKey:@"detectedClass"];
+        
+        [outBoxes addObject:res];
+        
+        NSMutableArray *discardedItems = [NSMutableArray array];
+        for (Box *box in sortedBoxes) {
+            // Only compare boxes of the same class
+            if (box.detectedClass == topBox.detectedClass) {
+                float iou = calculateIOU(box, topBox);
+                if (iou >= iouThreshold) {
+                    [discardedItems addObject:box];
+                }
+            }
+        }
+        [sortedBoxes removeObjectsInArray:discardedItems];
+        //    LOGGER.i("after pruning boxes left: %d", inputBoxList.size());
+    }
+    //    LOGGER.i("Final box countL: %d", outputBoxList.size());
+    
+    return outBoxes;
+}
+
+NSMutableArray* parseYOLOv3(int num_classes, const NSArray* anchors, int block_size, int num_boxes_per_bolock,
+                          int num_results_per_class, float threshold, int input_size) {
+    std::priority_queue<std::pair<float, Box*>, std::vector<std::pair<float, Box*>>,
+    std::less<std::pair<float, Box*>>> top_result_pq;
+    
+    float* output = interpreter->typed_output_tensor<float>(0);
+    YOLOv3Head(32,
+               output,
+               input_size,
+               num_classes,
+               threshold,
+               num_boxes_per_bolock,
+               anchors[0],
+               &top_result_pq
+               );
+    output = interpreter->typed_output_tensor<float>(1);
+    YOLOv3Head(16,
+               output,
+               input_size,
+               num_classes,
+               threshold,
+               num_boxes_per_bolock,
+               anchors[1],
+               &top_result_pq
+               );
+    
+    NSMutableArray* results = performNMS(top_result_pq, 0.4);
+    
+    return results;
+}
+
+void YOLOv3Head(
+                int block_size,
+                float* output,
+                int input_size,
+                int num_classes,
+                float threshold,
+                int num_boxes_per_bolock,
+                const NSArray* anchors,
+                std::priority_queue<std::pair<float, Box*>, std::vector<std::pair<float, Box*>>,
+                std::less<std::pair<float, Box*>>> *top_result_pq
+    ) {
+    int grid_size = input_size / block_size;
+    for (int y = 0; y < grid_size; ++y) {
+        for (int x = 0; x < grid_size; ++x) {
+            for (int b = 0; b < num_boxes_per_bolock; ++b) {
+                int offset = (grid_size * (num_boxes_per_bolock * (num_classes + 5))) * y
+                + (num_boxes_per_bolock * (num_classes + 5)) * x
+                + (num_classes + 5) * b;
+
+                float confidence = sigmoid(output[offset + 4]);
+
+                float classes[num_classes];
+                for (int c = 0; c < num_classes; ++c) {
+                    classes[c] = output[offset + 5 + c];
+                }
+
+                int detected_class = -1;
+                float max_class = 0;
+                for (int c = 0; c < num_classes; ++c) {
+                    float weight = sigmoid(classes[c]);
+                    if (weight > max_class) {
+                        detected_class = c;
+                        max_class = weight;
+                    }
+                }
+                
+                float confidence_in_class = max_class * confidence;
+                if (confidence_in_class > threshold) {
+                    float xPos = (x + sigmoid(output[offset + 0])) * block_size;
+                    float yPos = (y + sigmoid(output[offset + 1])) * block_size;
+                    
+                    float anchor_w = [[anchors objectAtIndex:(2 * b + 0)] floatValue];
+                    float anchor_h = [[anchors objectAtIndex:(2 * b + 1)] floatValue];
+                    float w = exp(output[offset + 2]) * anchor_w;
+                    float h = exp(output[offset + 3]) * anchor_h;
+                    
+                    float x = fmax(0, (xPos - w / 2) / input_size);
+                    float y = fmax(0, (yPos - h / 2) / input_size);
+                    
+                    Box *box = [[Box alloc] init];
+                    
+                    box.x = x;
+                    box.y = y;
+                    box.width = fmin(input_size - x, w / input_size);
+                    box.height = fmin(input_size - y, h / input_size);
+                    box.confidence = confidence_in_class;
+                    box.classValue = max_class;
+                    
+                    NSString* class_name = [NSString stringWithUTF8String:labels[detected_class].c_str()];
+                    box.className = class_name;
+                    box.detectedClass = detected_class;
+                    top_result_pq->push(std::pair<float, Box*>(confidence_in_class, box));
+                }
+            }
+        }
+    }
+}
+
 void detectObjectOnImage(NSDictionary* args, FlutterResult result) {
   const NSString* image_path = args[@"path"];
   const NSString* model = args[@"model"];
@@ -616,7 +821,7 @@ void detectObjectOnImage(NSDictionary* args, FlutterResult result) {
   }
   
   int input_size;
-  feedInputTensorImage(image_path, input_mean, input_std, &input_size);
+  feedInputTensorImageResize(image_path, input_mean, input_std, &input_size, 416, 416);
   
   runTflite(args, ^(TfLiteStatus status) {
     if (status != kTfLiteOk) {
@@ -626,9 +831,12 @@ void detectObjectOnImage(NSDictionary* args, FlutterResult result) {
 
     if ([model isEqual: @"SSDMobileNet"])
       return result(parseSSDMobileNet(threshold, num_results_per_class));
-    else
+    else if ([model isEqual: @"YOLO"])
       return result(parseYOLO((int)(labels.size() - 1), anchors, block_size, num_boxes_per_block, num_results_per_class,
                               threshold, input_size));
+    else if ([model isEqual: @"YOLOv3"])
+        return result(parseYOLOv3((int)(labels.size() - 1), anchors, block_size, num_boxes_per_block, num_results_per_class,
+                                threshold, input_size));
   });
 }
 

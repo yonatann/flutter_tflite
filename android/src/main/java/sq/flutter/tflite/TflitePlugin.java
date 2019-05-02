@@ -40,6 +40,7 @@ import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
@@ -305,11 +306,36 @@ public class TflitePlugin implements MethodCallHandler {
     return imgData;
   }
 
-  ByteBuffer feedInputTensorImage(String path, float mean, float std) throws IOException {
+  public Bitmap getResizedBitmap(Bitmap bm, int newWidth, int newHeight) {
+    int width = bm.getWidth();
+    int height = bm.getHeight();
+    float scaleWidth = ((float) newWidth) / width;
+    float scaleHeight = ((float) newHeight) / height;
+    // CREATE A MATRIX FOR THE MANIPULATION
+    Matrix matrix = new Matrix();
+    // RESIZE THE BIT MAP
+    matrix.postScale(scaleWidth, scaleHeight);
+
+    // "RECREATE" THE NEW BITMAP
+    Bitmap resizedBitmap = Bitmap.createBitmap(
+            bm, 0, 0, width, height, matrix, false);
+    return resizedBitmap;
+  }
+
+  ByteBuffer feedInputTensorImage(String path, float mean, float std, int newWidth, int newHeight) throws IOException {
     InputStream inputStream = new FileInputStream(path.replace("file://",""));
-    Bitmap bitmapRaw = BitmapFactory.decodeStream(inputStream);
+    Bitmap bitmapRaw;
+    if (newWidth == 0 && newHeight == 0) {
+      bitmapRaw = BitmapFactory.decodeStream(inputStream);
+    } else {
+      bitmapRaw = Bitmap.createScaledBitmap(BitmapFactory.decodeStream(inputStream), newWidth, newHeight, true);
+    }
 
     return feedInputTensor(bitmapRaw, mean, std);
+  }
+
+  ByteBuffer feedInputTensorImage(String path, float mean, float std) throws IOException {
+    return feedInputTensorImage(path, mean, std, 0 , 0);
   }
 
   ByteBuffer feedInputTensorFrame(List<byte[]> bytesList, int imageHeight, int imageWidth, float mean, float std, int rotation) throws IOException {
@@ -492,17 +518,28 @@ public class TflitePlugin implements MethodCallHandler {
     float IMAGE_STD = (float)std;
     double threshold = (double)args.get("threshold");
     float THRESHOLD = (float)threshold;
-    List<Double> ANCHORS = (ArrayList)args.get("anchors");
     int BLOCK_SIZE = (int)args.get("blockSize");
     int NUM_BOXES_PER_BLOCK = (int)args.get("numBoxesPerBlock");
     int NUM_RESULTS_PER_CLASS = (int)args.get("numResultsPerClass");
 
-    ByteBuffer imgData = feedInputTensorImage(path, IMAGE_MEAN, IMAGE_STD);
+    int newWidth = 0;
+    int newHeight = 0;
+
+    if (model.equals("YOLOv3")) {
+      newWidth = 416;
+      newHeight = 416;
+    }
+
+    ByteBuffer imgData = feedInputTensorImage(path, IMAGE_MEAN, IMAGE_STD, newWidth, newHeight);
 
     if (model.equals("SSDMobileNet")) {
       new RunSSDMobileNet(args, imgData, NUM_RESULTS_PER_CLASS, THRESHOLD, result).executeTfliteTask();
-    } else {
+    } else if (model.equals("YOLO")) {
+      List<Double> ANCHORS = (ArrayList)args.get("anchors");
       new RunYOLO(args, imgData, BLOCK_SIZE, NUM_BOXES_PER_BLOCK, ANCHORS, THRESHOLD, NUM_RESULTS_PER_CLASS, result).executeTfliteTask();
+    } else if (model.equals("YOLOv3")) {
+      List<List<Integer>> ANCHORS = (ArrayList)args.get("anchors");
+      new RunYOLOv3(args, imgData, BLOCK_SIZE, NUM_BOXES_PER_BLOCK, ANCHORS, THRESHOLD, NUM_RESULTS_PER_CLASS, result).executeTfliteTask();
     }
   }
 
@@ -864,6 +901,207 @@ public class TflitePlugin implements MethodCallHandler {
         results.add(ret);
       }
       result.success(results);
+    }
+  }
+
+  private class Box {
+    float x;
+    float y;
+    float w;
+    float h;
+    float confidenceInClass;
+    float classValue;
+    String detectedClass;
+  }
+
+  private class RunYOLOv3 extends TfliteTask {
+    ByteBuffer imgData;
+    int blockSize;
+    int numBoxesPerBlock;
+    List<List<Integer>> anchors;
+    float threshold;
+    int numResultsPerClass;
+    long startTime;
+    int numClasses;
+    final float[][][][] output_0, output_1;
+    Map<Integer, Object> outputMap;
+    Object[] inputArray;
+
+    RunYOLOv3(HashMap args,
+            ByteBuffer imgData,
+            int blockSize,
+            int numBoxesPerBlock,
+            List<List<Integer>> anchors,
+            float threshold,
+            int numResultsPerClass,
+            Result result)
+    {
+      super(args, result);
+      this.imgData = imgData;
+      this.blockSize = blockSize;
+      this.numBoxesPerBlock = numBoxesPerBlock;
+      this.anchors = anchors;
+      this.threshold = threshold;
+      this.numResultsPerClass = numResultsPerClass;
+      this.startTime = SystemClock.uptimeMillis();
+
+      Tensor tensor = tfLite.getInputTensor(0);
+      inputSize = tensor.shape()[1];
+
+      this.numClasses = labels.size();
+      this.output_0 = new float[1][13][13][(numClasses + 5) * numBoxesPerBlock];
+      this.output_1 = new float[1][26][26][(numClasses + 5) * numBoxesPerBlock];
+      this.outputMap = new HashMap<>();
+      outputMap.put(0, output_0);
+      outputMap.put(1, output_1);
+      inputArray = new Object[1];
+      inputArray[0] = imgData;
+    }
+
+    protected void runTflite() {
+      tfLite.runForMultipleInputsOutputs(inputArray, outputMap);
+    }
+
+    protected void onRunTfliteDone() {
+      Log.v("time", "Inference took " + (SystemClock.uptimeMillis() - startTime));
+
+      PriorityQueue<Box> pq =
+              new PriorityQueue<>(
+                      1,
+                      new Comparator<Box>() {
+                        @Override
+                        public int compare(Box lhs, Box rhs) {
+                          float diff = rhs.confidenceInClass - lhs.confidenceInClass;
+                          if (diff > 0) {
+                            return 1;
+                          } else if (diff < 0) {
+                            return  -1;
+                          } else {
+                            return 0;
+                          }
+                        }
+                      });
+      this.yolo_head(output_0, 32, anchors.get(0), numClasses, numBoxesPerBlock, threshold, pq);
+      this.yolo_head(output_1, 16, anchors.get(1), numClasses, numBoxesPerBlock, threshold, pq);
+
+      List<Map<String, Object>> results = this.nms(pq, 0.4);
+
+      result.success(results);
+    }
+
+    protected void yolo_head(final float[][][][] output, int blockSize, List<Integer> anchors, int numClasses, int numBoxesPerBlock, float threshold, PriorityQueue<Box> pq) {
+      int gridSize = inputSize / blockSize;
+      for (int y = 0; y < gridSize; ++y) {
+        for (int x = 0; x < gridSize; ++x) {
+          for (int b = 0; b < numBoxesPerBlock; ++b) {
+            final int offset = (numClasses + 5) * b;
+
+            final float confidence = expit(output[0][y][x][offset + 4]);
+
+            final float[] classes = new float[numClasses];
+            for (int c = 0; c < numClasses; ++c) {
+              classes[c] = output[0][y][x][offset + 5 + c];
+            }
+
+            int detectedClass = -1;
+            float maxClass = 0;
+            for (int c = 0; c < numClasses; ++c) {
+              float weight = expit(classes[c]);
+              if (weight > maxClass) {
+                detectedClass = c;
+                maxClass = weight;
+              }
+            }
+
+            final float confidenceInClass = maxClass * confidence;
+            if (confidenceInClass > threshold) {
+              final float xPos = (x + expit(output[0][y][x][offset + 0])) * blockSize;
+              final float yPos = (y + expit(output[0][y][x][offset + 1])) * blockSize;
+
+              final float w = (float) (Math.exp(output[0][y][x][offset + 2]) * anchors.get(2 * b + 0));
+              final float h = (float) (Math.exp(output[0][y][x][offset + 3]) * anchors.get(2 * b + 1));
+
+              final float xmin = Math.max(0, (xPos - w / 2) / inputSize);
+              final float ymin = Math.max(0, (yPos - h / 2) / inputSize);
+
+              Box box = new Box();
+              box.x = xmin;
+              box.y = ymin;
+              box.w = Math.min(inputSize - xmin, w / inputSize);
+              box.h = Math.min(inputSize - ymin, h / inputSize);
+              box.confidenceInClass = confidenceInClass;
+              box.detectedClass = labels.get(detectedClass);
+              box.classValue = maxClass;
+
+              pq.add(box);
+            }
+          }
+        }
+      }
+    }
+
+    private List<Map<String, Object>> nms(PriorityQueue<Box> pq, double iouThreshold) {
+      List<Map<String, Object>> outputBoxList = new ArrayList<>();
+
+      while (!pq.isEmpty()) {
+        Box topBox = pq.remove();
+
+        Map<String, Object> rect = new HashMap<>();
+        rect.put("x", topBox.x);
+        rect.put("y", topBox.y);
+        rect.put("w", topBox.w);
+        rect.put("h", topBox.h);
+
+        Map<String, Object> ret = new HashMap<>();
+        ret.put("rect", rect);
+        ret.put("confidenceInClass", topBox.confidenceInClass);
+        ret.put("detectedClass", topBox.detectedClass);
+
+        outputBoxList.add(ret);
+
+
+        Iterator<Box> boxIterator = pq.iterator();
+        while(boxIterator.hasNext()) {
+          Box box = boxIterator.next();
+          // Only compare boxes of the same class
+          if (box.detectedClass.equals(topBox.detectedClass)) {
+            float iou = iou(topBox, box);
+            if (iou >= iouThreshold) {
+              boxIterator.remove();
+            }
+          }
+        }
+      }
+
+      return outputBoxList;
+    }
+
+    private float iou(Box boxA, Box boxB) {
+      // determine the (x, y)-coordinates of the intersection rectangle
+      float boxAx2 = boxA.x + boxA.w;
+      float boxAy2 = boxA.y + boxA.h;
+
+      float boxBx2 = boxB.x + boxB.w;
+      float boxBy2 = boxB.y + boxB.h;
+
+      float xA = Math.max(boxA.x, boxB.x);
+      float yA = Math.max(boxA.y, boxB.y);
+      float xB = Math.min(boxAx2, boxBx2);
+      float yB = Math.min(boxAy2, boxBy2);
+
+      // compute the area of intersection rectangle
+      float interArea = Math.max(0, xB - xA) * Math.max(0, yB - yA);
+
+      // compute the area of both the prediction and ground-truth rectangles
+      float boxAArea = boxA.w * boxA.h;
+      float boxBArea = boxB.w * boxB.h;
+
+      // compute the intersection over union by taking the intersection
+      // area and dividing it by the sum of prediction + ground-truth
+      // areas - the interesection area
+      float iou = interArea / (boxAArea + boxBArea - interArea);
+      // return the intersection over union value
+      return iou;
     }
   }
 

@@ -33,6 +33,6 @@ android {
     }
 
     dependencies {
-        compile 'org.tensorflow:tensorflow-lite:+'
+        implementation 'org.tensorflow:tensorflow-lite:+'
     }
 }
