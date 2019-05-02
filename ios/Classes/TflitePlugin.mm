@@ -868,9 +868,12 @@ void detectObjectOnBinary(NSDictionary* args, FlutterResult result) {
 
     if ([model isEqual: @"SSDMobileNet"])
       return result(parseSSDMobileNet(threshold, num_results_per_class));
-    else
+    else if ([model isEqual: @"YOLO"])
       return result(parseYOLO((int)(labels.size() - 1), anchors, block_size, num_boxes_per_block, num_results_per_class,
                               threshold, input_size));
+    else if ([model isEqual: @"YOLOv3"])
+        return result(parseYOLOv3((int)(labels.size() - 1), anchors, block_size, num_boxes_per_block, num_results_per_class,
+                                  threshold, input_size));
   });
 }
 

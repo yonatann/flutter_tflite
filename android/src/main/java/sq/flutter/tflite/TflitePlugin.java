@@ -548,7 +548,6 @@ public class TflitePlugin implements MethodCallHandler {
     String model = args.get("model").toString();
     double threshold = (double)args.get("threshold");
     float THRESHOLD = (float)threshold;
-    List<Double> ANCHORS = (ArrayList)args.get("anchors");
     int BLOCK_SIZE = (int)args.get("blockSize");
     int NUM_BOXES_PER_BLOCK = (int)args.get("numBoxesPerBlock");
     int NUM_RESULTS_PER_CLASS = (int)args.get("numResultsPerClass");
@@ -557,8 +556,12 @@ public class TflitePlugin implements MethodCallHandler {
 
     if (model.equals("SSDMobileNet")) {
       new RunSSDMobileNet(args, imgData, NUM_RESULTS_PER_CLASS, THRESHOLD, result).executeTfliteTask();
-    } else {
+    } else if (model.equals("YOLO")) {
+      List<Double> ANCHORS = (ArrayList)args.get("anchors");
       new RunYOLO(args, imgData, BLOCK_SIZE, NUM_BOXES_PER_BLOCK, ANCHORS, THRESHOLD, NUM_RESULTS_PER_CLASS, result).executeTfliteTask();
+    } else if (model.equals("YOLOv3")) {
+      List<List<Integer>> ANCHORS = (ArrayList)args.get("anchors");
+      new RunYOLOv3(args, imgData, BLOCK_SIZE, NUM_BOXES_PER_BLOCK, ANCHORS, THRESHOLD, NUM_RESULTS_PER_CLASS, result).executeTfliteTask();
     }
   }
 

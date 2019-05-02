@@ -128,7 +128,7 @@ class _MyAppState extends State<MyApp> {
   }
 
   Uint8List imageToByteListFloat32(
-      img.Image image, int inputSize, double mean, double std) {
+    img.Image image, int inputSize, double mean, double std) {
     var convertedBytes = Float32List(1 * inputSize * inputSize * 3);
     var buffer = Float32List.view(convertedBytes.buffer);
     int pixelIndex = 0;
@@ -210,12 +210,27 @@ class _MyAppState extends State<MyApp> {
 
   Future yolov3Tiny(File image) async {
     print('yolov3Tiny detection...');
-    var recognitions = await Tflite.detectObjectOnImage(
-      path: image.path,
+    // var recognitions = await Tflite.detectObjectOnImage(
+    //   path: image.path,
+    //   model: "YOLOv3",
+    //   threshold: 0.25,
+    //   imageMean: 0.0,
+    //   imageStd: 255.0,
+    //   numBoxesPerBlock: 3,
+    //   anchors: [ 
+    //     [203,124, 123,278, 285,331],
+    //     [12,25, 35,67, 63,160]
+    //   ],
+    //   numResultsPerClass: 1,
+    // );
+
+    var imageBytes = (await rootBundle.load(image.path)).buffer;
+    img.Image oriImage = img.decodeJpg(imageBytes.asUint8List());
+    img.Image resizedImage = img.copyResize(oriImage, 416, 416);
+    var recognitions = await Tflite.detectObjectOnBinary(
+      binary: imageToByteListFloat32(resizedImage, 416, 0.0, 255.0),
       model: "YOLOv3",
-      threshold: 0.25,
-      imageMean: 0.0,
-      imageStd: 255.0,
+      threshold: 0.2,
       numBoxesPerBlock: 3,
       anchors: [ 
         [203,124, 123,278, 285,331],
@@ -223,15 +238,6 @@ class _MyAppState extends State<MyApp> {
       ],
       numResultsPerClass: 1,
     );
-    // var imageBytes = (await rootBundle.load(image.path)).buffer;
-    // img.Image oriImage = img.decodeJpg(imageBytes.asUint8List());
-    // img.Image resizedImage = img.copyResize(oriImage, 416, 416);
-    // var recognitions = await Tflite.detectObjectOnBinary(
-    //   binary: imageToByteListFloat32(resizedImage, 416, 0.0, 255.0),
-    //   model: "YOLOv3",
-    //   threshold: 0.25,
-    //   numResultsPerClass: 1,
-    // );
 
     // 8, 7, 1
     
