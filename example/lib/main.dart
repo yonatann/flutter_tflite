@@ -230,7 +230,7 @@ class _MyAppState extends State<MyApp> {
     var recognitions = await Tflite.detectObjectOnBinary(
       binary: imageToByteListFloat32(resizedImage, 416, 0.0, 255.0),
       model: "YOLOv3",
-      threshold: 0.2,
+      threshold: 0.25,
       numBoxesPerBlock: 3,
       anchors: [ 
         [203,124, 123,278, 285,331],
